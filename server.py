@@ -410,7 +410,7 @@ SUBMIT_TEMPLATE = """<!doctype html>
   <li>React your sensitive information using GovTech's <a href="https://privacy-filter.netlify.app">OpenAttestation Privacy Filter</a> and download it</li>
   <li>Host/deploy your downloaded redacted certificate somewhere (i.e., your certificate must be accessible from a URL)</li> 
   <li>Paste the Hosted/deployed certificate URL and submit to generate its OpenCerts link below.</li>
-  <li>Copy the link and share it on Linkedin or your preferred platform</li>
+  <li>Copy the Viewer URL and share it on Linkedin or your preferred platform</li>
   </p>
   <form id="f">
     <label for="url">Hosted/deployed certificate file URL</label>
