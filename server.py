@@ -400,14 +400,14 @@ SUBMIT_TEMPLATE = """<!doctype html>
 </style>
 </head>
 <body><div class="wrap">
-  <h1>Opencerts Sharable Link Generator</h1>
-  <h3>What is opencert</h3>
+  <h1>Opencerts Sharable Link Tool</h1>
+  <h3>What is OpenCerts?</h3>
   <p class="sub">OpenCerts is an open-source, blockchain-based platform originally developed by GovTech Singapore (the Government Technology Agency of Singapore) alongside local educational institutions and industry partners. It is designed for issuing and verifying tamper-resistant digital academic certificates and transcripts.</p>
   <h3>Purpose of this tool</h3>
   <p class="sub">OpenCerts certificates are plain text files. Unfortunately, platforms like Linkedin don't know how to handle such files, and they don't provide the users a simple way to share them.</p>
   <p class="sub">This tool help to share your certificate by generating a sharable link using the below process:
   <ul>
-  <li>React your sensitive information using <a href="https://privacy-filter.netlify.app">OpenAttestation Privacy Filter</a> and download it</li>
+  <li>React your sensitive information using GovTech's <a href="https://privacy-filter.netlify.app">OpenAttestation Privacy Filter</a> and download it</li>
   <li>Host/deploy your downloaded redacted certificate somewhere (i.e., your certificate must be accessible from a URL)</li> 
   <li>Paste the Hosted/deployed certificate URL and submit to generate its OpenCerts link below.</li>
   <li>Copy the link and share it on Linkedin or your preferred platform</li>
