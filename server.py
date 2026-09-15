@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""OpenCert API — accept an OpenCert file and open it in a certificate viewer.
+"""OpenCert API — ingest an OpenCert from a file URL and open it in a viewer.
 
 Endpoints:
-  POST /api/certificates          upload an OpenCert (multipart file part or raw JSON)
+  POST /api/certificates?url=<file-url>   fetch, validate and host the OpenCert,
+                                          then 302-redirect to the viewer
   GET  /api/certificates          list stored certificates
   GET  /api/certificates/<id>     fetch a stored certificate as JSON
   GET  /view/<id>                 open the certificate in the built-in viewer
-  GET  /                          API docs / landing page
+  GET  /submit                    web form to ingest a certificate (default page)
+  GET  /                          redirects to /submit
 
 Environment:
   PORT                  listen port (default 8080)
   HOST                  bind address (default 0.0.0.0)
   CERT_DATA_DIR         storage directory (default ./data/certificates)
   OPENCERT_VIEWER_URL   base URL of the OpenCert viewer (default
-                        https://www.opencerts.io/). The returned viewerUrl is
-                        this base with the hosted certificate URL appended.
-                        A built-in viewer page is also served at /view/<id>.
+                        https://www.opencerts.io/). For opencerts.io the link
+                        is a ?q= DOCUMENT action pointing at the hosted
+                        certificate; for other viewers the hosted certificate
+                        URL is appended. A built-in viewer page is also served
+                        at /view/<id>.
 
 Stdlib only — no third-party dependencies.
 """
 
-import email.parser
-import email.policy
 import html
 import json
 import os
@@ -39,6 +41,27 @@ VIEWER_URL_PREFIX = os.environ.get(
     "OPENCERT_VIEWER_URL", "https://www.opencerts.io/").strip()
 ID_RE = re.compile(r"^[a-f0-9]{16}$")
 MAX_BODY = 5 * 1024 * 1024  # 5 MB
+
+
+# Matches JavaScript's encodeURI(): reserved/mark characters (; , / ? : @ & = + $ - _ . ! ~ * ' ( ) #)
+# stay literal; everything else (notably '"', '{', '}', space) is percent-encoded.
+ENCODE_URI_SAFE = "!#$&'()*+,-./:;=?@_~"
+
+
+def encode_uri(s):
+    return quote(s, safe=ENCODE_URI_SAFE)
+
+
+def opencerts_viewer_url(cert_url):
+    """Deep-link format opencerts.io actually supports.
+
+    A bare path (https://www.opencerts.io/<url>) is not a route — the SPA falls
+    back to its upload page. The app reads a ?q= parameter holding a
+    URL-encoded OpenAttestation action; for a DOCUMENT action it fetches
+    payload.uri itself."""
+    action = json.dumps(
+        {"type": "DOCUMENT", "payload": {"uri": cert_url}}, separators=(",", ":"))
+    return "https://www.opencerts.io/?q=" + encode_uri(action)
 
 
 # ---------------------------------------------------------------- storage
@@ -151,21 +174,6 @@ def validate_opencert(doc):
             "('@context' plus 'credentialSubject')"]
 
 
-# ------------------------------------------------------------- multipart
-
-def parse_multipart(body, content_type):
-    """Parse a multipart/form-data body using the stdlib email parser."""
-    header = ("Content-Type: " + content_type + "\r\n\r\n").encode("utf-8")
-    msg = email.parser.BytesParser(policy=email.policy.default).parsebytes(header + body)
-    parts = []
-    for i, part in enumerate(msg.iter_parts()):
-        name = part.get_param("name", header="content-disposition")
-        filename = part.get_filename()
-        data = part.get_payload(decode=True) or b""
-        parts.append({"name": name, "filename": filename, "data": data, "index": i})
-    return parts
-
-
 # ----------------------------------------------------------------- html
 
 VIEWER_TEMPLATE = """<!doctype html>
@@ -248,11 +256,11 @@ VIEWER_TEMPLATE = """<!doctype html>
 </html>
 """
 
-LANDING_TEMPLATE = """<!doctype html>
+LINK_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenCert API</title>
+<title>Build viewer link — OpenCert API</title>
 <style>
   :root { color-scheme: light dark; --fg:#1c1e21; --muted:#6b7280; --card:#fff;
     --line:#e5e7eb; --bg:#f6f7f9; --accent:#2563eb; --code-bg:#0f172a; --code-fg:#e2e8f0; }
@@ -261,39 +269,239 @@ LANDING_TEMPLATE = """<!doctype html>
   body { margin:0; font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     background:var(--bg); color:var(--fg); }
   .wrap { max-width:760px; margin:0 auto; padding:48px 20px 80px; }
-  h1 { font-size:28px; } code { font-family:ui-monospace,Menlo,monospace; font-size:.9em;
-    background:rgba(127,127,127,.15); padding:1px 5px; border-radius:4px; }
-  pre { background:var(--code-bg); color:var(--code-fg); padding:14px 16px; border-radius:10px;
-    overflow:auto; font-size:13px; font-family:ui-monospace,Menlo,monospace; }
-  table { border-collapse:collapse; width:100%; margin:8px 0 28px; }
-  td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  .m { color:var(--accent); font-weight:600; white-space:nowrap; }
+  h1 { font-size:28px; }
+  label { display:block; font-weight:600; margin:18px 0 6px; }
+  input[type=text] { font:inherit; width:100%; padding:10px 12px; border:1px solid var(--line);
+    border-radius:8px; background:var(--card); color:var(--fg); box-sizing:border-box; }
+  code { font-family:ui-monospace,Menlo,monospace; font-size:.85em; overflow-wrap:anywhere; }
+  .row { display:flex; gap:12px; align-items:flex-start; margin:12px 0; }
+  .row .k { color:var(--muted); flex-shrink:0; width:104px; padding-top:9px; }
+  .row code { background:var(--code-bg); color:var(--code-fg); flex:1; padding:9px 12px; border-radius:8px; }
+  .actions { display:flex; gap:10px; align-items:center; margin-top:18px; }
+  button, a.btn { font:inherit; font-size:14px; font-weight:500; padding:9px 16px; border-radius:8px;
+    border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; text-decoration:none; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .copied { color:var(--accent); font-size:13px; }
+  .hidden { display:none; }
+  .hint { color:var(--muted); font-size:13.5px; margin-top:28px; }
+  .hint code { background:rgba(127,127,127,.15); padding:1px 5px; border-radius:4px; }
 </style>
 </head>
 <body><div class="wrap">
-  <h1>OpenCert API</h1>
-  <p>Upload an OpenCert file and get back a hosted URL plus a link that opens it in the
-  certificate viewer.</p>
-  <table>
-    <tr><td class="m">POST</td><td><code>/api/certificates</code></td><td>Upload an OpenCert — multipart file part <code>file</code>, or a raw <code>application/json</code> body</td></tr>
-    <tr><td class="m">GET</td><td><code>/api/certificates</code></td><td>List stored certificates</td></tr>
-    <tr><td class="m">GET</td><td><code>/api/certificates/&lt;id&gt;</code></td><td>Fetch a certificate as JSON</td></tr>
-    <tr><td class="m">GET</td><td><code>/view/&lt;id&gt;</code></td><td>Open the certificate in the built-in viewer (for local testing)</td></tr>
-  </table>
-  <h2>Upload example</h2>
-  <pre>curl -F "file=@sample.opencert.json" http://localhost:8080/api/certificates</pre>
-  <p>Response:</p>
-  <pre>{{
-  "id": "0a1b2c3d4e5f6a7b",
-  "name": "Alice Nguyen",
-  "url": "http://localhost:8080/api/certificates/0a1b2c3d4e5f6a7b",
-  "viewerUrl": "https://www.opencerts.io/http%3A%2F%2Flocalhost%3A8080%2Fapi%2Fcertificates%2F0a1b2c3d4e5f6a7b"
-}}</pre>
-  <p>Open <code>viewerUrl</code> to view the certificate. By default it points to
-  <code>https://www.opencerts.io/</code> with the hosted <code>url</code> appended.
-  Change it by setting <code>OPENCERT_VIEWER_URL</code> (e.g.
-  <code>https://viewer.example.com/?cert=</code>).</p>
-</div></body></html>
+  <h1>Build a viewer link</h1>
+  <p>Paste a gist or certificate file URL. This builds the <code>opencerts.io</code>
+  viewer link — a URL-encoded <code>DOCUMENT</code> action the viewer opens by
+  fetching the file itself — ready to share (e.g. as a LinkedIn link).</p>
+
+  <label for="in">Gist or certificate file URL</label>
+  <input id="in" type="text" spellcheck="false"
+         placeholder="https://gist.github.com/&lt;user&gt;/&lt;gist-id&gt;  — or any http(s) file URL"
+         oninput="build()">
+
+  <div class="row"><span class="k">File URL</span><code id="file">—</code></div>
+  <div class="row"><span class="k">Viewer link</span><code id="out">—</code></div>
+
+  <div class="actions">
+    <button class="primary" onclick="copy()">Copy viewer link</button>
+    <a id="open" class="btn" target="_blank" rel="noopener" href="#">Open in viewer</a>
+    <span id="copied" class="copied hidden">Copied &#10003;</span>
+  </div>
+
+  <p class="hint">Accepts <code>gist.github.com/&lt;user&gt;/&lt;id&gt;</code> in any form
+  (page URL, <code>/raw</code>, with file name) — it is rewritten to the raw file —
+  plus any direct http(s) file URL. The viewer fetches the file from its own origin,
+  so the URL must stay public and must allow cross-origin reads.</p>
+</div>
+<script>
+  function normalize(v) {
+    v = (v || "").trim();
+    var m = v.match(/^(https?:\/\/gist\.github\.com\/([^/]+)\/([0-9a-f]{32})(?:\/([^/?#]*))?(?:[?#].*)?$/i);
+    if (m) {
+      var sub = m[4];
+      sub = (!sub || sub.toLowerCase() === "raw") ? "raw" : "raw/" + encodeURIComponent(sub);
+      return m[1] + "://gist.githubusercontent.com/" + m[2] + "/" + m[3] + "/" + sub;
+    }
+    return /^https?:\/\//i.test(v) ? v : null;
+  }
+  function build() {
+    var fileUrl = normalize(document.getElementById("in").value);
+    var f = document.getElementById("file"), o = document.getElementById("out"),
+        a = document.getElementById("open");
+    if (!fileUrl) {
+      f.textContent = o.textContent = "—";
+      a.href = "#";
+      return;
+    }
+    f.textContent = fileUrl;
+    var link = "https://www.opencerts.io/?q=" + encodeURI(
+        JSON.stringify({type: "DOCUMENT", payload: {uri: fileUrl}}));
+    o.textContent = link;
+    a.href = link;
+  }
+  function copy() {
+    var t = document.getElementById("out").textContent;
+    if (!t || t === "—") return;
+    var done = function() {
+      var c = document.getElementById("copied");
+      c.classList.remove("hidden");
+      setTimeout(function() { c.classList.add("hidden"); }, 1500);
+    };
+    if (navigator.clipboard) navigator.clipboard.writeText(t).then(done, function() { prompt("Copy the viewer link:", t); });
+    else prompt("Copy the viewer link:", t);
+  }
+</script>
+</body>
+</html>
+"""
+
+
+SUBMIT_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Submit a certificate — OpenCert API</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1c1e21; --muted:#6b7280; --card:#fff;
+    --line:#e5e7eb; --bg:#f6f7f9; --accent:#2563eb; --ok:#16a34a; --err:#dc2626; }
+  @media (prefers-color-scheme: dark) { --fg:#e5e7eb; --muted:#9ca3af; --card:#111827;
+    --line:#273043; --bg:#0b1017; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; }
+  body { margin:0; font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg); color:var(--fg); }
+  .wrap { max-width:640px; margin:0 auto; padding:48px 20px 80px; }
+  h1 { font-size:28px; margin:0 0 8px; }
+  p.sub { color:var(--muted); margin:0 0 24px; }
+  label { display:block; font-weight:600; margin:0 0 6px; }
+  .row { display:flex; gap:10px; align-items:stretch; }
+  input[type=text] { font:inherit; flex:1; min-width:0; padding:10px 12px; border:1px solid var(--line);
+    border-radius:8px; background:var(--card); color:var(--fg); box-sizing:border-box; }
+  button { font:inherit; font-size:14px; font-weight:600; padding:10px 18px; border-radius:8px;
+    border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  #panel { margin-top:20px; border:1px solid var(--line); border-radius:10px; padding:16px 18px;
+    background:var(--card); display:none; }
+  #panel.show { display:block; }
+  #panel.ok { border-left:4px solid var(--ok); }
+  #panel.err { border-left:4px solid var(--err); }
+  #panel h2 { font-size:14px; margin:0 0 10px; }
+  #panel.ok h2 { color:var(--ok); }
+  #panel.err h2 { color:var(--err); }
+  .kv { display:flex; justify-content:space-between; gap:16px; padding:5px 0;
+    border-bottom:1px solid var(--line); font-size:13.5px; }
+  .kv:last-child { border-bottom:0; }
+  .kv .k { color:var(--muted); flex-shrink:0; }
+  .kv .v { font-weight:500; text-align:right; overflow-wrap:anywhere; }
+  .kv .v.url-row { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+  .kv .v.url-row .url-text { overflow-wrap:anywhere; }
+  .copy-btn { font:inherit; font-size:12px; font-weight:600; padding:3px 10px; border-radius:6px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; flex-shrink:0; }
+  #panel a.btn { display:inline-block; margin-top:12px; font-weight:600; color:var(--accent);
+    text-decoration:none; }
+  ul.errs { margin:6px 0 0; padding-left:18px; font-size:13.5px; }
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Submit a certificate</h1>
+  <p class="sub">Paste an OpenCert file URL and submit — the result appears below.</p>
+
+  <form id="f">
+    <label for="url">Certificate file URL</label>
+    <div class="row">
+      <input id="url" type="text" name="url" spellcheck="false" autocomplete="off"
+             placeholder="https://example.com/certificate.opencert" required>
+      <button id="btn" type="submit">Submit</button>
+    </div>
+  </form>
+
+  <div id="panel"></div>
+</div>
+<script>
+  var form = document.getElementById("f");
+  var btn = document.getElementById("btn");
+  var panel = document.getElementById("panel");
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\\"": "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function kv(k, v) {
+    return '<div class="kv"><span class="k">' + escapeHtml(k) + '</span>' +
+           '<span class="v">' + escapeHtml(v) + '</span></div>';
+  }
+
+  function kvWithCopy(k, v) {
+    return '<div class="kv"><span class="k">' + escapeHtml(k) + '</span>' +
+           '<span class="v url-row"><span class="url-text">' + escapeHtml(v) + '</span>' +
+           '<button type="button" class="copy-btn" data-url="' + escapeHtml(v) +
+           '" onclick="copyViewerUrl(this)">Copy</button></span></div>';
+  }
+
+  function copyViewerUrl(button) {
+    var url = button.getAttribute("data-url");
+    var reset = function () {
+      setTimeout(function () { button.textContent = "Copy"; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () {
+        button.textContent = "Copied ✓";
+        reset();
+      }, function () {
+        prompt("Copy this link:", url);
+      });
+    } else {
+      prompt("Copy this link:", url);
+    }
+  }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var url = document.getElementById("url").value.trim();
+    if (!url) return;
+
+    btn.disabled = true;
+    btn.textContent = "Submitting…";
+    panel.className = "show";
+    panel.innerHTML = "<p>Fetching and validating…</p>";
+
+    fetch("/api/certificates?url=" + encodeURIComponent(url) + "&format=json", { method: "POST" })
+      .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          var b = res.body;
+          var rows = "";
+          if (b.name) rows += kv("Name", b.name);
+          if (b.issued) rows += kv("Issued", b.issued);
+          rows += kvWithCopy("Viewer URL", b.viewerUrl);
+          panel.className = "show ok";
+          panel.innerHTML = "<h2>Certificate ingested</h2>" + rows +
+            '<a class="btn" href="' + escapeHtml(b.viewerUrl) + '" target="_blank" rel="noopener">View certificate →</a>';
+        } else {
+          var b = res.body || {};
+          var details = "";
+          if (Array.isArray(b.details) && b.details.length) {
+            details = "<ul class=\\"errs\\">" + b.details.map(function (d) {
+              return "<li>" + escapeHtml(d) + "</li>";
+            }).join("") + "</ul>";
+          } else if (b.detail) {
+            details = "<p>" + escapeHtml(b.detail) + "</p>";
+          }
+          panel.className = "show err";
+          panel.innerHTML = "<h2>" + escapeHtml(b.error || "Request failed") + "</h2>" + details;
+        }
+      })
+      .catch(function (err) {
+        panel.className = "show err";
+        panel.innerHTML = "<h2>Request failed</h2><p>" + escapeHtml(err.message || err) + "</p>";
+      })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = "Submit";
+      });
+  });
+</script>
+</body>
+</html>
 """
 
 
@@ -443,23 +651,24 @@ class Handler(BaseHTTPRequestHandler):
     def _html(self, code, page):
         self._send(code, page, "text/html; charset=utf-8")
 
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _base(self):
         host = self.headers.get("Host") or "localhost:%d" % PORT
         return "http://%s" % host
 
     def viewer_url_for(self, cert_id, cert_url):
-        if VIEWER_URL_PREFIX:
-            return VIEWER_URL_PREFIX + quote(cert_url, safe="")
-        return "/view/%s" % cert_id
-
-    def _read_body(self):
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY:
-            return None, 413
-        return self.rfile.read(length), None
+        prefix = VIEWER_URL_PREFIX
+        if not prefix:
+            return "/view/%s" % cert_id
+        if urlparse(prefix).netloc in ("www.opencerts.io", "opencerts.io"):
+            return opencerts_viewer_url(cert_url)
+        return prefix + quote(cert_url, safe="")
 
     # -- verbs
 
@@ -475,7 +684,11 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
             if path == "/":
-                return self._html(200, LANDING_TEMPLATE)
+                return self._redirect("/submit")
+            if path == "/link":
+                return self._html(200, LINK_TEMPLATE)
+            if path == "/submit":
+                return self._html(200, SUBMIT_TEMPLATE)
             if path == "/api/certificates":
                 return self._json(200, {"certificates": list_certificates()})
             m = re.fullmatch(r"/api/certificates/([a-f0-9]{16})", path)
@@ -510,8 +723,12 @@ class Handler(BaseHTTPRequestHandler):
             return None, (413, {"error": "remote file too large (max 5 MB)", "url": ext_url})
         return raw, None
 
-    def _ingest(self, raw):
-        """Shared path: JSON parse -> validate -> store -> 201 response."""
+    def _ingest(self, raw, ext_url, as_json=False):
+        """Shared path: JSON parse -> validate -> store -> redirect to the viewer.
+
+        With as_json=True, respond with a JSON summary instead of redirecting,
+        and build the viewer link straight from the submitted url rather than
+        storing a copy (used by the /submit page)."""
         try:
             doc = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -521,53 +738,41 @@ class Handler(BaseHTTPRequestHandler):
         if errors:
             return self._json(400, {"error": "not a valid OpenCert", "details": errors})
 
+        if as_json:
+            return self._json(200, {
+                "viewerUrl": self.viewer_url_for(None, ext_url),
+                "name": display_name(doc),
+                "issued": issued_date(doc),
+            })
+
         cert_id = save_certificate(doc)
         cert_url = "%s/api/certificates/%s" % (self._base(), cert_id)
-        return self._json(201, {
-            "id": cert_id,
-            "name": display_name(doc),
-            "url": cert_url,
-            "viewerUrl": self.viewer_url_for(cert_id, cert_url),
-            "created": True,
-        })
+        self._redirect(self.viewer_url_for(cert_id, cert_url))
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
         if path != "/api/certificates":
             return self._json(404, {"error": "not found"})
         try:
-            # Option 1: fetch the certificate from an external URL
+            # The certificate file URL comes from the request params;
+            # the server fetches it — no file uploads.
             qs = parse_qs(urlparse(self.path).query)
             ext_url = (qs.get("url") or [None])[0]
-            if ext_url:
-                raw, err = self._fetch_url(ext_url)
-                if err:
-                    return self._json(err[0], err[1])
-                return self._ingest(raw)
-
-            # Option 2: upload the certificate in the request body
-            body, err = self._read_body()
-            if err:
-                return self._json(err, {"error": "request too large (max 5 MB)"})
-            ctype = (self.headers.get("Content-Type") or "").lower()
-
-            if "application/json" in ctype:
-                raw = body or b"{}"
-            elif "multipart/form-data" in ctype:
-                parts = parse_multipart(body or b"", self.headers.get("Content-Type"))
-                if not parts:
-                    return self._json(400, {"error": "no file part in multipart body"})
-                # prefer an explicitly named "file" part, else the first file
-                named = [p for p in parts if p["name"] == "file" and p["data"]]
-                with_file = [p for p in parts if p["filename"] and p["data"]]
-                pick = (named or with_file or parts)[0]
-                raw = pick["data"]
-            else:
-                return self._json(415, {
-                    "error": "unsupported Content-Type",
-                    "expected": ["multipart/form-data (file part)", "application/json"],
+            as_json = (qs.get("format") or [None])[0] == "json"
+            if not ext_url:
+                return self._json(400, {
+                    "error": "missing required 'url' query parameter",
+                    "hint": "POST /api/certificates?url=<certificate-file-url>",
                 })
-            return self._ingest(raw)
+            if as_json and not VIEWER_URL_PREFIX:
+                return self._json(400, {
+                    "error": "no external viewer configured (OPENCERT_VIEWER_URL is empty); "
+                             "format=json needs a viewer to link to since it doesn't host a copy",
+                })
+            raw, err = self._fetch_url(ext_url)
+            if err:
+                return self._json(err[0], err[1])
+            return self._ingest(raw, ext_url, as_json=as_json)
         except Exception as e:  # noqa: BLE001
             return self._json(500, {"error": str(e)})
 
@@ -576,7 +781,7 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("OpenCert API listening on http://%s:%d" % (HOST, PORT), flush=True)
     print("  docs:     http://localhost:%d/" % PORT)
-    print("  upload:   curl -F \"file=@sample.opencert.json\" http://localhost:%d/api/certificates" % PORT)
+    print("  ingest:   curl -X POST \"http://localhost:%d/api/certificates?url=&lt;certificate-file-url&gt;\"" % PORT)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
